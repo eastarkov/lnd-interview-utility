@@ -111,10 +111,11 @@ def recognize(key, record, recognition_size=None):
             for segment in segments:
                 result.append({'start': segment.start, 'end': segment.end, 'text': segment.text})
                 words.extend({'start': w.start, 'end': w.end, 'word': w.word} for w in (segment.words or []))
-                progress.progress(min(1.0, segment.end / max(info.duration, 1)))
+                progress.progress(min(0.99, segment.end / max(info.duration, 1)))
             delete_transcript(LIBRARY, key, record)
             record.update(segments=result, words=words, duration=info.duration, pending=False, recognition={'model':selected_size,'language':language})
             save_record(LIBRARY, key, record)
+            progress.progress(1.0)
             status.update(label='Расшифровка сохранена', state='complete')
             return True
     except Exception as error:
