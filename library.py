@@ -71,7 +71,7 @@ def atomic_json(path, value):
 
 def save_record(base, key, record):
     atomic_json(Path(base)/key/'record.json', {k: v for k, v in record.items()
-                if k in {'name','content_key','duration','segments','words','person','summary','recognition','pending','original_path'}})
+                if k in {'name','content_key','duration','media_duration','segments','words','person','summary','recognition','pending','original_path'}})
 
 
 def update_record(base, key, changes, expected_segments=None):

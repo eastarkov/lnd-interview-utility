@@ -47,6 +47,24 @@ def extract_audio(source, target):
     ffmpeg(['-i', source, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', target])
 
 
+def video_duration(source):
+    import av
+    try:
+        with av.open(str(source)) as container:
+            if not container.streams.video:
+                raise ValueError('В файле нет видеодорожки.')
+            video = container.streams.video[0]
+            if video.duration and video.time_base:
+                duration = float(video.duration * video.time_base)
+            else:
+                duration = float(container.duration or 0) / av.time_base
+    except av.error.FFmpegError as error:
+        raise ValueError('Не удалось прочитать видео.') from error
+    if duration <= 0:
+        raise ValueError('Не удалось определить длительность видео.')
+    return duration
+
+
 def timecode(seconds):
     ms = max(0, round(float(seconds) * 1000))
     minutes, ms = divmod(ms, 60000)

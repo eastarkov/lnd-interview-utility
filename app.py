@@ -6,15 +6,16 @@ import json
 import math
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 import streamlit as st
-from core import timecode, parse_time, person_query, lexical_matches
+from core import timecode, parse_time, person_query, lexical_matches, video_duration
 from semantic import passages
 from processing import DEFAULT_MODEL, MODELS, JobState, Processing
 from library import (load_records, save_record, delete_transcript, atomic_json,
                      choose_videos, content_key, update_record, video_path)
 from words import frequent_words
 from player import editor, timeline
-from montage import clip_id, validate, reordered, edited
+from montage import clip_bounds, clip_id, source_duration, validate, reordered, edited
 from after_effects import exchange_path, unlinked_records, write_exchange
 
 st.set_page_config(page_title='LND Interview Utility', page_icon=':material/movie:', layout='wide')
@@ -33,7 +34,7 @@ if saved_model not in model_choices:
 header, options = st.columns([5, 1.3])
 with header:
     st.title('LND Interview Utility')
-    st.caption('Видеотека → поиск по словам → монтаж для After Effects')
+    st.caption('Ручной монтаж и поиск по словам для After Effects')
 with options:
     with st.popover('Настройки'):
         appearance = st.selectbox('Тема приложения', ['Светлая', 'Тёмная'], index=1 if settings.get('theme')=='dark' else 0, key='appearance-v5')
@@ -77,8 +78,8 @@ def attach_original(key, record, path):
     processing.clear('frame', key)
 
 
-def add_videos(paths):
-    queued = []
+def add_videos(paths, transcribe=True):
+    added = []
     errors = []
     for value in paths:
         try:
@@ -90,18 +91,24 @@ def add_videos(paths):
                 attach_original(existing, records[existing], source)
                 st.info(f'{source.name}: оригинал привязан к существующей записи.')
                 continue
+            duration = video_duration(source)
             folder = LIBRARY / digest
             folder.mkdir(exist_ok=True)
             record = {'name':source.name, 'content_key':digest, 'original_path':str(source), 'source':str(source),
-                      'audio':str(folder/'audio.wav'), 'segments':[], 'words':[], 'duration':0, 'pending':True}
+                      'audio':str(folder/'audio.wav'), 'segments':[], 'words':[], 'duration':0,
+                      'media_duration': duration, 'pending':True}
             records[digest] = record
             save_record(LIBRARY, digest, record)
-            queued.append((digest, record))
+            added.append((digest, record))
         except (OSError, ValueError) as error:
             errors.append(f'Не удалось добавить файл: {error}')
-    for key, record in queued:
-        processing.transcribe(key, record, size, language)
-    if queued:
+    if transcribe:
+        for key, record in added:
+            processing.transcribe(key, record, size, language)
+    if added:
+        if not transcribe:
+            st.session_state['last-manual-source'] = added[0][0]
+            st.session_state.pop('manual-source', None)
         st.session_state['import-errors'] = errors
         st.rerun()
     for error in errors:
@@ -295,10 +302,70 @@ def finished_jobs(states):
 
 def choose_word(word):
     st.session_state['search-query'] = word
+    st.session_state['last-query'] = word
 
 @st.cache_data(show_spinner=False)
 def popular(serialized):
     return frequent_words([{'words':json.loads(words)} for words in serialized])
+
+
+def video_import(widget_prefix, transcribe):
+    with st.expander('Добавить видео', expanded=not bool(records)):
+        st.caption('Выберите оригиналы на этом Mac. Видеофайлы остаются на своих местах.')
+        if st.button('Выбрать видео на Mac', type='primary', key=widget_prefix+'-choose'):
+            try:
+                add_videos(choose_videos(), transcribe)
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                st.error(str(error))
+        with st.popover('Указать пути вручную'):
+            paths = st.text_area('Пути к файлам, по одному на строку', placeholder='/Users/…/Видео.mov',
+                                 key=widget_prefix+'-paths')
+            if st.button('Добавить по путям', disabled=not paths.strip(), key=widget_prefix+'-submit'):
+                add_videos((line.strip() for line in paths.splitlines() if line.strip()), transcribe)
+
+
+def render_manual():
+    video_import('manual-import', transcribe=False)
+    available = [key for key, record in records.items() if Path(record['source']).is_file()]
+    if not available:
+        if records:
+            st.info('Привяжите исходный файл в видеотеке, чтобы открыть его для монтажа.')
+        return False
+    available.sort(key=lambda k: records[k]['name'].casefold())
+    selected = st.session_state.get('last-manual-source')
+    index = available.index(selected) if selected in available else 0
+    key = st.selectbox('Исходное видео', available, index=index,
+                       format_func=lambda k: records[k]['name'], key='manual-source')
+    st.session_state['last-manual-source'] = key
+    record = records[key]
+    try:
+        if not record.get('media_duration'):
+            record['media_duration'] = video_duration(record['source'])
+            update_record(LIBRARY, key, {'media_duration': record['media_duration']})
+    except (OSError, ValueError) as error:
+        st.error(str(error))
+        return False
+
+    duration = record['media_duration']
+    acknowledgements = st.session_state.setdefault('manual-ack', {})
+    ack = acknowledgements.get(key)
+    value = editor(record['source'], 0, duration, duration, key='manual-editor-'+key,
+                   theme=theme, manual=True, ack=ack)
+    if not isinstance(value, dict) or value.get('type') != 'add':
+        return False
+    sequence = value.get('sequence')
+    if type(sequence) is not int or (ack and sequence <= ack['sequence']):
+        return False
+    try:
+        start, end = clip_bounds(value['start'], value['end'], duration)
+    except (KeyError, TypeError, ValueError):
+        acknowledgements[key] = {'sequence': sequence, 'ok': False}
+        return True
+    identity = 'manual-' + uuid4().hex
+    project[identity] = {'id': identity, 'record_key': key, 'start': start, 'end': end, 'text': ''}
+    acknowledgements[key] = {'sequence': sequence, 'ok': True}
+    return True
+
 
 def render_search():
     if not any(not r.get('pending') for r in records.values()):
@@ -312,9 +379,18 @@ def render_search():
             columns = st.columns(6)
             for column, (word, count) in zip(columns, common[offset:offset+6]):
                 column.button(f'{word} · {count}', key='popular-'+word, on_click=choose_word, args=(word,))
-    query = st.text_input('Человек, тема или варианты фразы', placeholder='дамир редизайн · или: редизайн, redesign', key='search-query')
+    if 'search-query' not in st.session_state:
+        st.session_state['search-query'] = st.session_state.get('last-query', '')
+    query = st.text_input('Человек, тема или варианты фразы',
+                          placeholder='дамир редизайн · или: редизайн, redesign', key='search-query')
+    st.session_state['last-query'] = query
     people = sorted({r.get('person', '') for r in records.values()} - {''})
-    filters = st.multiselect('Искать у людей', people, placeholder='Все люди') if people else []
+    saved_filters = [person for person in st.session_state.get('last-filters', []) if person in people]
+    if 'search-filters' not in st.session_state:
+        st.session_state['search-filters'] = saved_filters
+    filters = st.multiselect('Искать у людей', people,
+                             placeholder='Все люди', key='search-filters') if people else []
+    st.session_state['last-filters'] = filters
     person, text_query = person_query(query, people)
     if person:
         st.caption(f'Поиск только у: {person}')
@@ -347,8 +423,9 @@ def render_search():
     changed_selection = False
     for identity, record, hit in matches[(page-1)*5:page*5]:
         existing = project.get(identity)
+        duration = source_duration(record)
         default_start = timecode(max(0, hit['start'] - pre))
-        default_end = timecode(min(record['duration'], hit['end'] + post))
+        default_end = timecode(min(duration, hit['end'] + post))
         edit = saved.setdefault(identity, {
             'start': timecode(existing['start']) if existing else default_start,
             'end': timecode(existing['end']) if existing else default_end,
@@ -362,11 +439,9 @@ def render_search():
             try:
                 start, end = parse_time(edit['start']), parse_time(edit['end'])
                 source = record['source'] if Path(record['source']).is_file() else None
-                value = editor(source, start, end, record['duration'], key='editor-'+identity, theme=theme)
+                value = editor(source, start, end, duration, key='editor-'+identity, theme=theme)
                 if value and value.get('sequence') != edit.get('sequence'):
-                    new_start, new_end = float(value['start']), float(value['end'])
-                    if not 0 <= new_start < new_end <= record['duration'] + .001:
-                        raise ValueError('Проверьте границы фрагмента.')
+                    new_start, new_end = clip_bounds(value['start'], value['end'], duration)
                     edit.update(start=timecode(new_start), end=timecode(new_end), sequence=value['sequence'])
             except Exception as error:
                 st.error(f'Редактор: {error}')
@@ -376,19 +451,24 @@ def render_search():
                 changed_selection = True
             elif existing or add:
                 try:
-                    start, end = parse_time(edit['start']), parse_time(edit['end'])
-                    if not 0 <= start < end <= record['duration'] + .001:
-                        raise ValueError('Проверьте границы фрагмента.')
+                    start, end = clip_bounds(parse_time(edit['start']), parse_time(edit['end']), duration)
                     project[identity] = {'id': identity, 'record_key': hit['record_key'],
-                                         'start': start, 'end': min(end, record['duration']), 'text': hit['text']}
+                                         'start': start, 'end': end, 'text': hit['text']}
                     changed_selection |= add
                 except ValueError as error:
                     st.error(str(error))
                     invalid |= bool(existing)
     return invalid, changed_selection
 
-library_tab, search_tab = st.tabs(['Видеотека', 'Поиск'])
-with library_tab:
+for error in st.session_state.pop('import-errors', []):
+    st.error(error)
+
+with st.container(key='app-navigation'):
+    page = st.segmented_control('Раздел', ['Видеотека', 'Ручной монтаж', 'Поиск'],
+                                default='Видеотека', label_visibility='collapsed',
+                                key='app-navigation-choice') or 'Видеотека'
+invalid = changed_selection = manual_changed = False
+if page == 'Видеотека':
     polling = any(status.state in ('queued', 'running') for status in jobs_at_load.values())
     for key, record in records.items():
         needs_frame = (('frame', key) not in jobs_at_load and Path(record['source']).is_file()
@@ -398,21 +478,21 @@ with library_tab:
         polling = polling or bool(needs_frame or needs_summary)
     # Keep the fragment at a fixed position even when the queue finishes.
     st.fragment(render_library, run_every=1 if polling else None)()
-    with st.expander('Добавить видео', expanded=not bool(records)):
-        st.caption('Выберите оригиналы на этом Mac. Видеофайлы остаются на своих местах.')
-        if st.button('Выбрать видео на Mac', type='primary'):
-            try:
-                add_videos(choose_videos())
-            except (RuntimeError, subprocess.TimeoutExpired) as error:
-                st.error(str(error))
-        with st.popover('Указать пути вручную'):
-            paths = st.text_area('Пути к файлам, по одному на строку', placeholder='/Users/…/Видео.mov')
-            if st.button('Добавить по путям', disabled=not paths.strip()):
-                add_videos(line.strip() for line in paths.splitlines() if line.strip())
-    for error in st.session_state.pop('import-errors', []):
-        st.error(error)
+    video_import('library-import', transcribe=True)
 
-with search_tab:
+elif page == 'Ручной монтаж':
+    manual_changed = render_manual()
+
+else:
+    @st.fragment(run_every=1 if any(kind == 'transcript' and job.state in ('queued', 'running')
+                                    for (kind, _), job in jobs_at_load.items()) else None)
+    def refresh_search():
+        def transcripts(states):
+            return {key: status for key, status in finished_jobs(states).items() if key[0] == 'transcript'}
+        if transcripts(processing.snapshot()) != transcripts(jobs_at_load):
+            st.rerun()
+
+    refresh_search()
     invalid, changed_selection = render_search()
 
 st.divider()
@@ -420,7 +500,7 @@ items = validate(list(project.values()), records)
 st.session_state['montage-v5'] = items
 atomic_json(project_path, items)
 atomic_json(edits_path, st.session_state['clip-edits'])
-if changed_selection:
+if changed_selection or manual_changed:
     st.rerun()
 
 def clear_montage():
@@ -439,7 +519,7 @@ with st.container(key='montage-dock'):
                 preview_data.append(dict(item, source=source if Path(source).is_file() else None,
                                          label=record.get('person') or record['name'],
                                          duration=item['end'] - item['start'],
-                                         source_duration=record['duration']))
+                                         source_duration=source_duration(record)))
             action = timeline(preview_data, theme=theme)
             if action and action.get('sequence') != st.session_state.get('timeline-sequence'):
                 st.session_state['timeline-sequence'] = action['sequence']
@@ -454,7 +534,7 @@ with st.container(key='montage-dock'):
         except Exception as error:
             st.error(f'Не удалось показать таймлайн: {error}')
     else:
-        st.info('Добавьте фрагменты из результатов поиска.')
+        st.info('Добавьте фрагменты во вкладке «Ручной монтаж» или «Поиск».')
 
     path = exchange_path(DATA)
     has_exchange = path.is_file()

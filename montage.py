@@ -6,16 +6,27 @@ def clip_id(record_key,start,end):
     return hashlib.sha256(f'{record_key}:{start:.4f}:{end:.4f}'.encode()).hexdigest()[:24]
 
 
+def source_duration(record):
+    return record.get('media_duration') or record.get('duration') or 0
+
+
+def clip_bounds(start, end, duration):
+    start, end = float(start), float(end)
+    if not (0 <= start < min(end, duration) and end <= duration + .001):
+        raise ValueError('Границы фрагмента должны быть внутри исходного видео.')
+    return start, min(end, duration)
+
+
 def validate(items,records):
     result=[];seen=set()
     for item in items:
         try:
             key=item['record_key'];record=records[key]
-            start,end=float(item['start']),float(item['end'])
-            if record.get('pending') or not 0<=start<end<=record['duration']+.001 or item['id'] in seen:
+            start, end = clip_bounds(item['start'], item['end'], source_duration(record))
+            if item['id'] in seen:
                 continue
             seen.add(item['id'])
-            result.append(dict(item,start=start,end=min(end,record['duration'])))
+            result.append(dict(item,start=start,end=end))
         except (KeyError,ValueError,TypeError):
             continue
     return result
@@ -37,9 +48,7 @@ def edited(items, action, records):
     if action.get('type')=='remove':
         return [item for item in items if item['id']!=target]
     if action.get('type')=='trim':
-        start,end=float(action['start']),float(action['end'])
-        duration=records[existing['record_key']]['duration']
-        if not 0<=start<end<=duration+.001:
-            raise ValueError('Границы фрагмента должны быть внутри исходного видео.')
-        return [dict(item,start=start,end=min(end,duration)) if item['id']==target else item for item in items]
+        duration = source_duration(records[existing['record_key']])
+        start, end = clip_bounds(action['start'], action['end'], duration)
+        return [dict(item,start=start,end=end) if item['id']==target else item for item in items]
     raise ValueError('Неизвестное действие монтажа.')
