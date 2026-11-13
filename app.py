@@ -546,11 +546,18 @@ with st.container(key='montage-dock'):
             st.caption(f'Привяжите оригиналы через «Управление записью»: {note}.')
         elif not items:
             st.caption('Если обновить файл сейчас, при следующем запуске в AE импортированные фрагменты будут убраны.')
+        include_subtitles = st.checkbox('Субтитры для After Effects',
+                                        value=bool(settings.get('ae_subtitles', False)),
+                                        key='ae-subtitles',
+                                        help='Добавляет редактируемый текст по таймкодам расшифровки. Снимите флажок и обновите файл, чтобы убрать эту дорожку из AE.')
+        if include_subtitles != settings.get('ae_subtitles', False):
+            settings['ae_subtitles'] = include_subtitles
+            atomic_json(settings_path, settings)
         actions = st.columns([2.5, 2, 1.25])
         button_label = 'Обновить файл для AE' if has_exchange else 'Экспорт в After Effects'
         if actions[0].button(button_label, type='primary', disabled=invalid or bool(missing)):
             try:
-                path = write_exchange(DATA, items, records)
+                path = write_exchange(DATA, items, records, include_subtitles=include_subtitles)
                 st.session_state['ae-notice'] = 'Файл обновлён.' if has_exchange else 'Файл готов.'
                 if not has_exchange:
                     subprocess.run(['/usr/bin/open', '-R', str(path)], check=False, timeout=5)

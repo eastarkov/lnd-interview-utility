@@ -4,6 +4,7 @@
     if (!data) return;
     var compTag = "[VideoWords:" + data.id + "]";
     var clipTag = "[VideoWords:" + data.id + ":";
+    var subtitleTag = "[VideoWordsSubtitles:" + data.id + "]";
     var limit = 10800;
 
     function taggedComp(project) {
@@ -100,12 +101,102 @@
         }
     }
 
+    function subtitleTiming(edits, step) {
+        var result = [];
+        for (var i = 0; i < edits.length; i++) {
+            var edit = edits[i], captions = edit.clip.captions || [];
+            var firstFrame = Math.round(edit.from / step), lastFrame = Math.round(edit.to / step);
+            for (var j = 0; j < captions.length; j++) {
+                var cue = captions[j];
+                var start = Math.max(firstFrame, Math.ceil((cue.start + edit.offset) / step - 0.000001));
+                var end = Math.min(lastFrame, Math.ceil((cue.end + edit.offset) / step - 0.000001));
+                var previous = result.length ? result[result.length - 1] : null;
+                if (end <= start || (previous && start <= previous.start)) continue;
+                if (previous) previous.end = Math.min(previous.end, start);
+                result.push({start: start, end: end, text: cue.text});
+            }
+        }
+        return result;
+    }
+
+    function updateSubtitles(comp, layer, edits, step, montageEnd) {
+        var cues = subtitleTiming(edits, step);
+        if (!cues.length) {
+            if (layer) {
+                layer.locked = false;
+                layer.remove();
+            }
+            return;
+        }
+        var isNew = !layer;
+        if (isNew) {
+            layer = comp.layers.addText(" ");
+            layer.name = "Субтитры";
+            layer.comment = subtitleTag;
+            layer.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height * 0.9]);
+        }
+        var locked = layer.locked;
+        if (locked) layer.locked = false;
+        try {
+            layer.stretch = 100;
+            layer.startTime = 0;
+            if (montageEnd > layer.outPoint) layer.outPoint = montageEnd;
+            layer.inPoint = 0;
+            layer.outPoint = montageEnd;
+
+            var sourceText = layer.property("ADBE Text Properties").property("ADBE Text Document");
+            var style = sourceText.value;
+            for (var k = 1; k <= sourceText.numKeys; k++) {
+                var documentAtKey = sourceText.keyValue(k);
+                if (documentAtKey.text) {
+                    style = documentAtKey;
+                    break;
+                }
+            }
+            if (isNew) {
+                style.fontSize = Math.max(1, Math.round(Math.min(comp.width, comp.height) * 0.044));
+                style.justification = ParagraphJustification.CENTER_JUSTIFY;
+                style.applyFill = true;
+                style.fillColor = [1, 1, 1];
+                style.applyStroke = true;
+                style.strokeColor = [0.05, 0.05, 0.05];
+                style.strokeWidth = Math.max(1, style.fontSize * 0.075);
+                style.strokeOverFill = false;
+            }
+            for (var i = sourceText.numKeys; i > 0; i--) sourceText.removeKey(i);
+            if (cues[0].start > 0) {
+                style.text = "";
+                sourceText.setValueAtTime(0, style);
+            }
+            var lastFrame = Math.round(montageEnd / step);
+            for (i = 0; i < cues.length; i++) {
+                var cue = cues[i];
+                style.text = cue.text;
+                sourceText.setValueAtTime(cue.start * step, style);
+                var nextStart = i + 1 < cues.length ? cues[i + 1].start : lastFrame;
+                if (cue.end < nextStart) {
+                    style.text = "";
+                    sourceText.setValueAtTime(cue.end * step, style);
+                }
+            }
+        } finally {
+            if (locked) layer.locked = true;
+        }
+    }
+
     function update(project, comp, clips) {
         var layers = {}, wanted = {}, manualEnd = 0, managedOrder = [], i;
+        var subtitles = null;
         for (i = 0; i < clips.length; i++) wanted[clips[i].id] = true;
         if (comp) {
             for (i = 1; i <= comp.numLayers; i++) {
-                var layer = comp.layer(i), key = layerKey(layer);
+                var layer = comp.layer(i);
+                if (("\n" + layer.comment + "\n").indexOf("\n" + subtitleTag + "\n") >= 0) {
+                    if (subtitles) throw new Error("Два слоя имеют метку субтитров VideoWords. Удалите метку в комментарии ручной копии слоя.");
+                    subtitles = layer;
+                    continue;
+                }
+                var key = layerKey(layer);
                 if (!key) {
                     manualEnd = Math.max(manualEnd, layer.outPoint);
                     continue;
@@ -198,6 +289,7 @@
                 layers[id].remove();
             }
         }
+        updateSubtitles(comp, subtitles, edits, step, montageEnd);
         if (length < comp.duration) comp.duration = length;
         if (fullWorkArea) {
             comp.workAreaStart = 0;
