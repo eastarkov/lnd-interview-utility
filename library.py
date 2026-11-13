@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from artifacts import artifact_lock
 
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi', '.mxf', '.mts', '.m2ts'}
 
@@ -73,6 +74,16 @@ def save_record(base, key, record):
                 if k in {'name','content_key','duration','segments','words','person','summary','recognition','pending','original_path'}})
 
 
+def update_record(base, key, changes, expected_segments=None):
+    path = Path(base) / key / 'record.json'
+    with artifact_lock(path):
+        record = json.loads(path.read_text(encoding='utf-8'))
+        if expected_segments is not None and record.get('segments') != expected_segments:
+            return
+        record.update(changes)
+        save_record(base, key, record)
+
+
 def resolve_source(folder, record):
     original = record.get('original_path')
     cached = next((p for p in sorted(Path(folder).glob('source.*')) if p.is_file()), None)
@@ -102,4 +113,4 @@ def delete_transcript(base, key, record):
     record.update(words=[], segments=[], pending=True)
     for name in ('vectors.npz', 'search_vectors.npz'):
         (Path(base)/key/name).unlink(missing_ok=True)
-    save_record(base, key, record)
+    update_record(base, key, {'words': [], 'segments': [], 'pending': True, 'summary': None})

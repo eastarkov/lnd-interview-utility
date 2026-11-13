@@ -1,18 +1,17 @@
 import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import hashlib
+from html import escape
 import json
 import math
 import subprocess
 from pathlib import Path
-import numpy as np
 import streamlit as st
-from faster_whisper import WhisperModel
-from core import extract_audio, timecode, parse_time, person_query, lexical_matches
-from semantic import SemanticIndex, passages, summary_indices
-from summarize import Summarizer
+from core import timecode, parse_time, person_query, lexical_matches
+from semantic import passages
+from processing import Processing
 from library import (load_records, save_record, delete_transcript, atomic_json,
-                     choose_videos, content_key, resolve_source, video_path)
+                     choose_videos, content_key, update_record, video_path)
 from words import frequent_words
 from player import editor, timeline
 from montage import clip_id, validate, reordered, edited
@@ -47,10 +46,16 @@ if settings.get('theme') != theme:
 st.html(f'<span data-vw-theme="{theme}"></span><style>' + (BASE / 'styles.css').read_text() + '</style>')
 LIBRARY = DATA / 'library'
 LIBRARY.mkdir(exist_ok=True)
-if 'records' not in st.session_state:
-    st.session_state.records, st.session_state.library_errors = load_records(LIBRARY)
-records = st.session_state.records
-for error in st.session_state.get('library_errors', []):
+@st.cache_resource
+def background(data):
+    return Processing(data)
+
+
+processing = background(DATA)
+# Read the worker state first so a just-finished write can trigger a refresh.
+jobs_at_load = processing.snapshot()
+records, library_errors = load_records(LIBRARY)
+for error in library_errors:
     st.warning('Не удалось открыть запись: ' + error)
 
 people_path = DATA / 'people.json'
@@ -59,75 +64,16 @@ try:
 except (OSError, ValueError):
     saved_people = {}
 
-@st.cache_resource(max_entries=1)
-def model(size):
-    return WhisperModel(size, device='cpu', compute_type='int8', download_root=str(DATA / 'whisper'))
-
-@st.cache_resource
-def semantic_model():
-    return SemanticIndex(DATA / 'models')
-
-@st.cache_resource
-def summary_model():
-    return Summarizer(DATA / "summary-model")
-
-@st.cache_data(show_spinner=False)
-def make_summary(texts):
-    items = [{"text": text} for text in texts]
-    vectors = embeddings(texts)
-    return summary_model().summarize(items, vectors)
-
-@st.cache_data(show_spinner=False)
-def embeddings(texts):
-    return semantic_model().encode(list(texts))
-
-def record_vectors(key, name, items):
-    texts = tuple(p['text'] for p in items)
-    digest = hashlib.sha256(repr(texts).encode()).hexdigest()
-    path = LIBRARY / key / (name + '.npz')
-    if path.exists():
-        try:
-            with np.load(path, allow_pickle=False) as cache:
-                if str(cache['digest']) == digest:
-                    return cache['vectors']
-        except (OSError, ValueError, KeyError):
-            pass
-    result = embeddings(texts)
-    temp = path.with_suffix('.tmp.npz')
-    np.savez(temp, digest=digest, vectors=result)
-    temp.replace(path)
-    return result
-
-
-def recognize(key, record, recognition_size=None):
-    selected_size = recognition_size or size
-    try:
-        with st.status(f"Распознавание: {record['name']}", expanded=True) as status:
-            if not Path(record['audio']).exists():
-                extract_audio(record['source'], record['audio'])
-            segments, info = model(selected_size).transcribe(record['audio'], language={'Авто': None, 'Русский': 'ru', 'English': 'en'}[language], word_timestamps=True, vad_filter=True)
-            result, words = [], []
-            progress = st.progress(0)
-            for segment in segments:
-                result.append({'start': segment.start, 'end': segment.end, 'text': segment.text})
-                words.extend({'start': w.start, 'end': w.end, 'word': w.word} for w in (segment.words or []))
-                progress.progress(min(0.99, segment.end / max(info.duration, 1)))
-            delete_transcript(LIBRARY, key, record)
-            record.update(segments=result, words=words, duration=info.duration, pending=False, recognition={'model':selected_size,'language':language})
-            save_record(LIBRARY, key, record)
-            progress.progress(1.0)
-            status.update(label='Расшифровка сохранена', state='complete')
-            return True
-    except Exception as error:
-        st.error(f"{record['name']}: {error}. Можно повторить распознавание кнопкой ниже.")
-        return False
 
 def attach_original(key, record, path):
     record.update(original_path=str(path), source=str(path))
-    save_record(LIBRARY, key, record)
+    update_record(LIBRARY, key, {'original_path': str(path)})
+    processing.clear('frame', key)
 
 
 def add_videos(paths):
+    queued = []
+    errors = []
     for value in paths:
         try:
             source = video_path(value)
@@ -144,22 +90,17 @@ def add_videos(paths):
                       'audio':str(folder/'audio.wav'), 'segments':[], 'words':[], 'duration':0, 'pending':True}
             records[digest] = record
             save_record(LIBRARY, digest, record)
-            recognize(digest, record)
+            queued.append((digest, record))
         except (OSError, ValueError) as error:
-            st.error(f'Не удалось добавить файл: {error}')
+            errors.append(f'Не удалось добавить файл: {error}')
+    for key, record in queued:
+        processing.transcribe(key, record, size, language)
+    if queued:
+        st.session_state['import-errors'] = errors
+        st.rerun()
+    for error in errors:
+        st.error(error)
 
-
-with st.expander('Добавить видео', expanded=not bool(records)):
-    st.caption('Выберите оригиналы на этом Mac. Видеофайлы остаются на своих местах.')
-    if st.button('Выбрать видео на Mac', type='primary'):
-        try:
-            add_videos(choose_videos())
-        except (RuntimeError, subprocess.TimeoutExpired) as error:
-            st.error(str(error))
-    with st.popover('Указать пути вручную'):
-        paths = st.text_area('Пути к файлам, по одному на строку', placeholder='/Users/…/Видео.mov')
-        if st.button('Добавить по путям', disabled=not paths.strip()):
-            add_videos(line.strip() for line in paths.splitlines() if line.strip())
 
 edits_path = DATA / 'clip-edits.json'
 if 'clip-edits' not in st.session_state:
@@ -183,13 +124,10 @@ if pending_action:
             identity = previous['id']
             edit = st.session_state.setdefault('clip-edits', {}).setdefault(identity, {})
             if pending_action['type']=='remove':
-                edit.update(start=timecode(previous['start']), end=timecode(previous['end']), selected=False)
-                st.session_state['select-'+identity] = False
+                edit.update(start=timecode(previous['start']), end=timecode(previous['end']))
             else:
                 item = next(i for i in updated if i['id']==identity)
-                edit.update(start=timecode(item['start']), end=timecode(item['end']), selected=True)
-                st.session_state['start-'+identity] = edit['start']
-                st.session_state['end-'+identity] = edit['end']
+                edit.update(start=timecode(item['start']), end=timecode(item['end']))
             project = {item['id']:item for item in updated}
             st.session_state['montage-v5'] = updated
             atomic_json(project_path, updated)
@@ -197,108 +135,155 @@ if pending_action:
             st.warning(f'Не удалось изменить фрагмент: {error}')
 
 
-if not records:
-    st.info('Добавьте видео, чтобы получить содержание и найти нужные фрагменты.')
-    st.stop()
-
-# Name fields stay visible; the detailed transcript is secondary.
-st.subheader('Видеотека')
-st.caption('Каждая карточка — отдельная запись: человек, содержание и расшифровка.')
 for key, record in records.items():
-    with st.container(border=True, key='library-card-'+key):
-        st.subheader(record['name'], anchor=False)
-        record.setdefault('content_key', key)
-        record['source'] = resolve_source(LIBRARY / key, record)
-        linked = bool(record.get('original_path') and Path(record['original_path']).is_file())
-        if not linked:
-            st.caption('Для After Effects привяжите оригинал на диске.')
-        with st.expander('Управление записью'):
-            original = record.get('original_path')
-            if original:
-                st.caption(('Оригинал: ' if linked else 'Оригинал перемещён или недоступен: ') + original)
-            else:
-                st.caption('В библиотеке есть копия. Укажите исходный файл, чтобы After Effects ссылался на него.')
-            pick, manual = st.columns(2)
-            selected_path = None
-            if pick.button('Привязать оригинал', key='link-original-'+key):
-                try:
-                    selected = choose_videos(multiple=False)
-                    selected_path = selected[0] if selected else None
-                except (RuntimeError, subprocess.TimeoutExpired) as error:
-                    st.error(str(error))
-            with manual.popover('Путь к оригиналу'):
-                value = st.text_input('Путь к файлу', key='original-path-'+key, placeholder='/Users/…/Видео.mov')
-                if st.button('Привязать по пути', key='save-original-'+key, disabled=not value.strip()):
-                    selected_path = value.strip()
-            if selected_path:
-                try:
-                    path = video_path(selected_path)
-                    with st.spinner('Проверяю, что это тот же исходник…'):
-                        if content_key(path) != record['content_key']:
-                            raise ValueError('Этот файл отличается от записи в библиотеке. Выберите тот же оригинал.')
-                    attach_original(key, record, path)
-                    st.rerun()
-                except (OSError, ValueError) as error:
-                    st.error(str(error))
-            if record.get('pending'):
-                st.caption('Расшифровка удалена или ещё не создана. Исходное видео сохранено.')
-                if st.button('Сгенерировать расшифровку', key='generate-'+key):
-                    if recognize(key, record):
-                        st.rerun()
-            else:
-                delete, regenerate = st.columns(2)
-                if delete.button('Удалить расшифровку', key='delete-'+key):
-                    delete_transcript(LIBRARY, key, record)
-                    st.rerun()
-                if regenerate.button('Перегенерировать', key='regenerate-'+key):
-                    if recognize(key, record):
-                        st.rerun()
-        if record.get('pending'):
-            continue
-        left, right = st.columns([2, 3])
-        left.caption(f"ДЛИТЕЛЬНОСТЬ · {timecode(record['duration'])}")
-        person = right.text_input('Кто говорит?', value=saved_people.get(record['content_key'], record.get('person','')), placeholder='Например: Дамир', key=f'person-{key}')
-        record['person'] = person.strip()
-        if saved_people.get(record['content_key'], '') != person.strip():
-            saved_people[record['content_key']] = person.strip()
-            atomic_json(people_path, saved_people)
-            save_record(LIBRARY, key, record)
-        record['passages'] = passages(record['segments'])
-        if record['passages']:
-            try:
-                with st.spinner('Выделяю основные темы… При первом запуске скачивается модель.'):
-                    vectors = record_vectors(key, 'vectors', record['passages'])
-                record['vectors'] = vectors
-                with st.spinner('Составляю краткое содержание… Первая загрузка языковой модели — около 3 ГБ.'):
-                    if not record.get('summary'):
-                        record['summary'] = make_summary(tuple(p['text'] for p in record['passages']))
-                        save_record(LIBRARY, key, record)
-                    st.markdown('**О чём это видео**')
-                    st.write(record['summary'])
-                st.caption('Автоматическое краткое содержание; сверяйте важные детали с записью. На длинных видео используются ключевые фрагменты.')
-            except Exception as error:
-                st.warning(f'Не удалось сформировать содержание. Поиск по словам продолжает работать. {error}')
-                if 'vectors' in record:
-                    for index in summary_indices(record['vectors']):
-                        passage = record['passages'][index]
-                        st.write(f"{timecode(passage['start'])} — {passage['text']}")
-                    st.caption('Резервный вариант: ключевые цитаты; связное содержание пока недоступно.')
-                else:
-                    st.caption('Краткое содержание пока недоступно; полная расшифровка ниже.')
+    record.setdefault('content_key', key)
+    record['person'] = saved_people.get(record['content_key'], record.get('person', ''))
+    record['passages'] = passages(record['segments']) if not record.get('pending') else []
+
+
+def manage_record(key, record, busy):
+    linked = bool(record.get('original_path') and Path(record['original_path']).is_file())
+    with st.expander('Управление записью'):
+        original = record.get('original_path')
+        if original:
+            st.caption(('Оригинал: ' if linked else 'Оригинал перемещён или недоступен: ') + original)
         else:
+            st.caption('В библиотеке есть копия. Укажите исходный файл, чтобы After Effects ссылался на него.')
+        selected_path = None
+        if st.button('Привязать оригинал', key='link-original-'+key):
+            try:
+                selected = choose_videos(multiple=False)
+                selected_path = selected[0] if selected else None
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                st.error(str(error))
+        value = st.text_input('Путь к оригиналу', key='original-path-'+key, placeholder='/Users/…/Видео.mov')
+        if st.button('Привязать по пути', key='save-original-'+key, disabled=not value.strip()):
+            selected_path = value.strip()
+        if selected_path:
+            try:
+                path = video_path(selected_path)
+                with st.spinner('Проверяю, что это тот же исходник…'):
+                    if content_key(path) != record['content_key']:
+                        raise ValueError('Этот файл отличается от записи в библиотеке. Выберите тот же оригинал.')
+                attach_original(key, record, path)
+                st.rerun()
+            except (OSError, ValueError) as error:
+                st.error(str(error))
+        if record.get('pending'):
+            if st.button('Сгенерировать расшифровку', key='generate-'+key, disabled=busy):
+                processing.transcribe(key, record, size, language)
+                st.rerun()
+        else:
+            delete, regenerate = st.columns(2)
+            if delete.button('Удалить расшифровку', key='delete-'+key, disabled=busy):
+                delete_transcript(LIBRARY, key, record)
+                processing.clear('transcript', key)
+                processing.clear('summary', key)
+                st.rerun()
+            if regenerate.button('Перегенерировать', key='regenerate-'+key, disabled=busy):
+                processing.transcribe(key, record, size, language)
+                st.rerun()
+
+
+def render_details(key, record, busy, summary_state, transcript_error, frame_error):
+    with st.popover('Подробнее', help=f"Запись {record['name']}"):
+        if transcript_error:
+            st.error(transcript_error)
+        if frame_error:
+            st.caption('Кадр недоступен. Проверьте исходный файл.')
+        manage_record(key, record, busy)
+        if record.get('pending'):
+            st.caption('Полная расшифровка появится после обработки.')
+            return
+        st.caption(f"Длительность · {timecode(record['duration'])}")
+        st.markdown('**Краткое содержание**')
+        if record.get('summary'):
+            st.write(record['summary'])
+        elif not record['passages']:
             st.caption('Речь не найдена.')
+        elif summary_state == 'error':
+            st.caption('Краткое содержание не удалось подготовить.')
+            if st.button('Повторить', key='summary-'+key, disabled=busy):
+                processing.summarize(key, record['segments'])
+        else:
+            st.caption('Содержание готовится.')
         with st.expander('Полная расшифровка'):
             current_model = record.get('recognition', {}).get('model', 'small')
-            more_accurate = 'large-v3' if current_model in ('medium','large-v3') else 'medium'
+            more_accurate = 'large-v3' if current_model in ('medium', 'large-v3') else 'medium'
             st.caption(f'Модель записи: {current_model}')
-            if st.button('Расшифровать точнее', key='improve-'+key, disabled=current_model=='large-v3', help=f'Повторное распознавание моделью {more_accurate}. Дольше, но обычно точнее. Сохранённый текст заменится после успешной обработки.'):
-                if recognize(key, record, recognition_size=more_accurate):
-                    st.rerun()
+            if st.button('Расшифровать точнее', key='improve-'+key,
+                         disabled=busy or current_model == 'large-v3'):
+                processing.transcribe(key, record, more_accurate, language)
+                st.rerun()
             for segment in record['segments']:
                 st.write(f"{timecode(segment['start'])} — {segment['text']}")
 
-st.divider()
-st.subheader('Найти фрагменты')
+
+def render_progress(key, record):
+    jobs = processing.snapshot()
+    state, percent, _ = jobs.get(('transcript', key), ('', 0, ''))
+    if state == 'queued':
+        label = 'В очереди'
+    elif state == 'running':
+        label = f'Распознаётся · {percent}%'
+    elif state == 'error':
+        label = 'Ошибка'
+    elif record.get('pending') and state != 'done':
+        label = 'Без расшифровки'
+    else:
+        label = 'Готово'
+        percent = 100
+        if jobs.get(('summary', key), ('',))[0] in ('queued', 'running'):
+            label = 'Готово · пересказ…'
+    name = escape(record['name'], quote=True)
+    st.html(f'<div class="vw-file-progress"><span class="vw-file-name">{name}</span>'
+            f'<progress value="{percent}" max="100" aria-label="Расшифровка {name}"></progress>'
+            f'<span role="status" aria-label="{name}: {label}">{label}</span></div>')
+
+
+def render_library():
+    jobs = processing.snapshot()
+    if finished_jobs(jobs) != finished_jobs(jobs_at_load):
+        st.rerun()
+    for key, record in sorted(records.items(), key=lambda item: item[1]['name'].casefold()):
+        transcript_state, _, error = jobs.get(('transcript', key), ('', 0, ''))
+        summary_state = jobs.get(('summary', key), ('',))[0]
+        frame_state = jobs.get(('frame', key), ('',))[0]
+        transcribing = transcript_state in ('queued', 'running')
+        if not transcribing and not summary_state and record['passages'] and not record.get('summary'):
+            processing.summarize(key, record['segments'])
+            summary_state = 'queued'
+        thumbnail = LIBRARY / key / 'thumbnail.jpg'
+        if not thumbnail.is_file() and not frame_state and Path(record['source']).is_file():
+            processing.thumbnail(key, record['source'])
+
+        with st.container(border=True, key='record-row-'+key, gap='small'):
+            preview, file, speaker, details = st.columns([1, 4.5, 2.2, 1.35], gap='small',
+                                                        vertical_alignment='center')
+            with preview:
+                if thumbnail.is_file():
+                    st.image(str(thumbnail), width=112)
+                else:
+                    st.html('<div class="vw-frame-placeholder" aria-label="Кадр недоступен"></div>')
+            with file:
+                render_progress(key, record)
+            with speaker:
+                person = st.text_input(f"Кто говорит? {record['name']}", value=record['person'],
+                                       placeholder='Кто говорит?', label_visibility='collapsed',
+                                       key=f'person-{key}').strip()
+                if person != record['person']:
+                    saved_people[record['content_key']] = person
+                    atomic_json(people_path, saved_people)
+                    update_record(LIBRARY, key, {'person': person})
+                    st.rerun()
+            with details:
+                render_details(key, record, transcribing, summary_state, error, frame_state == 'error')
+
+
+def finished_jobs(states):
+    return {job: state for job, (state, _, _) in states.items() if state in ('done', 'error')}
+
+
 def choose_word(word):
     st.session_state['search-query'] = word
 
@@ -306,64 +291,64 @@ def choose_word(word):
 def popular(serialized):
     return frequent_words([{'words':json.loads(words)} for words in serialized])
 
-active = [r for r in records.values() if not r.get('pending')]
-if active:
-    st.caption('Частые слова во всех готовых записях · формы слов объединены, предлоги и служебные слова исключены')
-    common = popular(tuple(json.dumps(r['words'], ensure_ascii=False) for r in active))
-    for offset in range(0, len(common), 6):
-        columns = st.columns(6)
-        for column, (word, count) in zip(columns, common[offset:offset+6]):
-            column.button(f'{word} · {count}', key='popular-'+word, on_click=choose_word, args=(word,))
-query = st.text_input('Человек, тема или варианты фразы', placeholder='дамир редизайн · или: редизайн, redesign', key='search-query')
-people = sorted({r.get('person', '') for r in records.values()} - {''})
-filters = st.multiselect('Искать у людей', people, placeholder='Все люди') if people else []
-person, text_query = person_query(query, people)
-if person:
-    st.caption(f'Поиск только у: {person}')
-st.caption('Запятая разделяет варианты «или». Поиск учитывает формы и родственные слова. Синонимы и переводы автоматически не добавляются.')
-search_active = bool(query.strip() or filters)
+def render_search():
+    if not any(not r.get('pending') for r in records.values()):
+        st.info('Добавьте видео в видеотеку. Поиск станет доступен после первой расшифровки.')
+        return False, False
+    active = [r for r in records.values() if not r.get('pending')]
+    if active:
+        st.caption('Частые слова во всех готовых записях · формы слов объединены, предлоги и служебные слова исключены')
+        common = popular(tuple(json.dumps(r['words'], ensure_ascii=False) for r in active))
+        for offset in range(0, len(common), 6):
+            columns = st.columns(6)
+            for column, (word, count) in zip(columns, common[offset:offset+6]):
+                column.button(f'{word} · {count}', key='popular-'+word, on_click=choose_word, args=(word,))
+    query = st.text_input('Человек, тема или варианты фразы', placeholder='дамир редизайн · или: редизайн, redesign', key='search-query')
+    people = sorted({r.get('person', '') for r in records.values()} - {''})
+    filters = st.multiselect('Искать у людей', people, placeholder='Все люди') if people else []
+    person, text_query = person_query(query, people)
+    if person:
+        st.caption(f'Поиск только у: {person}')
+    st.caption('Запятая разделяет варианты «или». Поиск учитывает формы и родственные слова. Синонимы и переводы автоматически не добавляются.')
+    search_active = bool(query.strip() or filters)
 
-matches = []
-for key, record in records.items():
-    if record.get('pending') or not search_active:
-        continue
-    if filters and record.get('person') not in filters:
-        continue
-    if person and record.get('person') != person:
-        continue
-    hits = lexical_matches(record, text_query) if text_query else [dict(p, kind='Фрагмент записи') for p in record['passages']]
-    for hit in sorted(hits, key=lambda h: h['start']):
-        identity = clip_id(key, hit['start'], hit['end'])
-        hit['record_key'] = key
-        matches.append((identity, record, hit))
+    matches = []
+    for key, record in records.items():
+        if record.get('pending') or not search_active:
+            continue
+        if filters and record.get('person') not in filters:
+            continue
+        if person and record.get('person') != person:
+            continue
+        hits = lexical_matches(record, text_query) if text_query else [dict(p, kind='Фрагмент записи') for p in record['passages']]
+        for hit in sorted(hits, key=lambda h: h['start']):
+            identity = clip_id(key, hit['start'], hit['end'])
+            hit['record_key'] = key
+            matches.append((identity, record, hit))
 
-if not matches and search_active:
-    st.info('Совпадений не найдено. Попробуйте другой корень слова или добавьте варианты через запятую.')
-if matches:
-    st.caption(f'Найдено: {len(matches)}. Отмеченные фрагменты добавляются в общий монтаж, в том числе из разных поисков.')
-    page = st.number_input('Страница результатов', min_value=1, max_value=max(1, math.ceil(len(matches)/5)), value=1, key='results-page-'+hashlib.sha256(repr((query, filters, len(matches))).encode()).hexdigest()[:12])
-else:
-    page = 1
-visible = {m[0] for m in matches[(page-1)*5:page*5]}
-invalid = False
-for identity, record, hit in matches:
-    default_start = timecode(max(0, hit['start']-pre))
-    default_end = timecode(min(record['duration'], hit['end']+post))
-    start_key, end_key, select_key = f'start-{identity}', f'end-{identity}', f'select-{identity}'
-    # Separate permanent state preserves edits and selection when paging hides widgets.
-    saved = st.session_state.setdefault('clip-edits', {})
-    existing = project.get(identity)
-    legacy = hashlib.sha256(f"{hit['record_key']}-{query}-{filters}-{pre}-{post}-{hit['start']}-{hit['end']}".encode()).hexdigest()[:20]
-    if identity not in saved and legacy in saved:
-        saved[identity] = saved[legacy].copy()
-    edit = saved.setdefault(identity, {'start': timecode(existing['start']) if existing else default_start, 'end': timecode(existing['end']) if existing else default_end, 'selected': True})
-    if identity in visible:
-        for widget_key, field in [(start_key, 'start'), (end_key, 'end'), (select_key, 'selected')]:
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = edit[field]
+    if not matches and search_active:
+        st.info('Совпадений не найдено. Попробуйте другой корень слова или добавьте варианты через запятую.')
+    if matches:
+        st.caption(f'Найдено: {len(matches)}')
+        page = st.number_input('Страница результатов', min_value=1, max_value=max(1, math.ceil(len(matches)/5)), value=1, key='results-page-'+hashlib.sha256(repr((query, filters, len(matches))).encode()).hexdigest()[:12])
+    else:
+        page = 1
+    saved = st.session_state['clip-edits']
+    invalid = False
+    changed_selection = False
+    for identity, record, hit in matches[(page-1)*5:page*5]:
+        existing = project.get(identity)
+        default_start = timecode(max(0, hit['start'] - pre))
+        default_end = timecode(min(record['duration'], hit['end'] + post))
+        edit = saved.setdefault(identity, {
+            'start': timecode(existing['start']) if existing else default_start,
+            'end': timecode(existing['end']) if existing else default_end,
+        })
         with st.container(border=True, key='result-card-'+identity):
-            st.caption(record['name'])
-            edit['selected'] = st.checkbox(f"{record.get('person') or record['name']} · {timecode(hit['start'])} · {hit['kind']}", key=select_key)
+            heading, action = st.columns([3, 1.4], gap='small', vertical_alignment='center')
+            heading.caption(f"{record.get('person') or record['name']} · {timecode(hit['start'])} · {hit['kind']}")
+            add = action.button('Убрать из монтажа' if existing else 'Добавить в монтаж',
+                                key='montage-toggle-'+identity, type='secondary' if existing else 'primary')
             st.write(hit['text'])
             try:
                 start, end = parse_time(edit['start']), parse_time(edit['end'])
@@ -377,30 +362,60 @@ for identity, record, hit in matches:
             except Exception as error:
                 st.error(f'Редактор: {error}')
 
-    if edit['selected']:
-        try:
-            start, end = parse_time(edit['start']), parse_time(edit['end'])
-            if not 0 <= start < end <= record['duration'] + .001:
-                raise ValueError('Некорректные границы')
-            project[identity] = {'id':identity, 'record_key':hit['record_key'], 'start':start,
-                                 'end':min(end, record['duration']), 'text':hit['text']}
-        except ValueError:
-            invalid = True
-    else:
-        project.pop(identity, None)
+            if existing and add:
+                project.pop(identity)
+                changed_selection = True
+            elif existing or add:
+                try:
+                    start, end = parse_time(edit['start']), parse_time(edit['end'])
+                    if not 0 <= start < end <= record['duration'] + .001:
+                        raise ValueError('Проверьте границы фрагмента.')
+                    project[identity] = {'id': identity, 'record_key': hit['record_key'],
+                                         'start': start, 'end': min(end, record['duration']), 'text': hit['text']}
+                    changed_selection |= add
+                except ValueError as error:
+                    st.error(str(error))
+                    invalid |= bool(existing)
+    return invalid, changed_selection
+
+library_tab, search_tab = st.tabs(['Видеотека', 'Поиск'])
+with library_tab:
+    polling = any(state in ('queued', 'running') for state, _, _ in jobs_at_load.values())
+    for key, record in records.items():
+        needs_frame = (('frame', key) not in jobs_at_load and Path(record['source']).is_file()
+                       and not (LIBRARY / key / 'thumbnail.jpg').is_file())
+        needs_summary = (('summary', key) not in jobs_at_load and record['passages']
+                         and not record.get('summary'))
+        polling = polling or bool(needs_frame or needs_summary)
+    # Keep the fragment at a fixed position even when the queue finishes.
+    st.fragment(render_library, run_every=1 if polling else None)()
+    with st.expander('Добавить видео', expanded=not bool(records)):
+        st.caption('Выберите оригиналы на этом Mac. Видеофайлы остаются на своих местах.')
+        if st.button('Выбрать видео на Mac', type='primary'):
+            try:
+                add_videos(choose_videos())
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                st.error(str(error))
+        with st.popover('Указать пути вручную'):
+            paths = st.text_area('Пути к файлам, по одному на строку', placeholder='/Users/…/Видео.mov')
+            if st.button('Добавить по путям', disabled=not paths.strip()):
+                add_videos(line.strip() for line in paths.splitlines() if line.strip())
+    for error in st.session_state.pop('import-errors', []):
+        st.error(error)
+
+with search_tab:
+    invalid, changed_selection = render_search()
 
 st.divider()
 items = validate(list(project.values()), records)
 st.session_state['montage-v5'] = items
 atomic_json(project_path, items)
-atomic_json(edits_path, st.session_state.get('clip-edits', {}))
+atomic_json(edits_path, st.session_state['clip-edits'])
+if changed_selection:
+    st.rerun()
 
 def clear_montage():
     st.session_state['montage-v5'] = []
-    for identity, edit in st.session_state.get('clip-edits', {}).items():
-        edit['selected'] = False
-        if 'select-'+identity in st.session_state:
-            st.session_state['select-'+identity] = False
     atomic_json(project_path, [])
 
 with st.container(key='montage-dock'):
@@ -430,7 +445,7 @@ with st.container(key='montage-dock'):
         except Exception as error:
             st.error(f'Не удалось показать таймлайн: {error}')
     else:
-        st.info('Отметьте фрагменты в результатах поиска — они появятся здесь.')
+        st.info('Добавьте фрагменты из результатов поиска.')
 
     path = exchange_path(DATA)
     has_exchange = path.is_file()
@@ -464,7 +479,7 @@ with st.container(key='montage-dock'):
                     except (OSError, subprocess.SubprocessError):
                         st.info('Скопируйте путь выше и вставьте его в диалог выбора файла.')
         if items:
-            actions[2].button('Очистить', on_click=clear_montage, help='Снять все отметки монтажа, сохранив видеотеку.')
+            actions[2].button('Очистить', on_click=clear_montage, help='Убрать все фрагменты из монтажа.')
         notice = st.session_state.pop('ae-notice', None)
         if notice:
             st.toast(notice + ' Запустите VideoWords.jsx в After Effects.')
