@@ -1,0 +1,57 @@
+/* Theme comes from Streamlit, never from the operating system independently. */
+:root{--vw-radius:18px;--vw-shadow:none;--vw-border:#728094;--vw-accent:#2563eb;--vw-ring:#2563eb;--vw-bg:transparent;--vw-surface:transparent;--vw-field:transparent;--vw-hover:transparent;--vw-text:inherit;--vw-muted:inherit}
+:root:has([data-vw-theme=light]){--vw-bg:#f5f6f8;--vw-surface:#ffffff;--vw-field:#f1f4f8;--vw-hover:#e2e9f3;--vw-text:#17212f;--vw-muted:#48586d;--vw-border:#6b7b90;--vw-accent:#1d4ed8;--vw-ring:#1d4ed8}
+:root:has([data-vw-theme=dark]){--vw-bg:#11151c;--vw-surface:#1b222e;--vw-field:#242f3e;--vw-hover:#354358;--vw-text:#edf2fa;--vw-muted:#becbde;--vw-border:#8797ad;--vw-accent:#9abfff;--vw-ring:#9abfff}
+body:has([data-vw-theme]) .stApp{background:var(--vw-bg)!important;color:var(--vw-text)!important}
+[data-testid=stMainBlockContainer]{max-width:1200px;padding-top:4rem;padding-bottom:5rem}
+body:has([data-vw-theme]) [data-testid=stSidebar]{background:var(--vw-surface)!important;border-right:1px solid var(--vw-border);color:var(--vw-text)!important}
+body:has([data-vw-theme]) :is([data-testid=stMarkdownContainer],[data-testid=stWidgetLabel],summary,h1,h2,h3){color:var(--vw-text)!important}
+h1,h2,h3{letter-spacing:-.025em;line-height:1.2!important;overflow-wrap:anywhere}
+h1{font-weight:750!important}h3{font-size:1.35rem!important}
+body:has([data-vw-theme]) :is([data-testid=stCaptionContainer],[data-testid=stCaptionContainer] p){color:var(--vw-muted)!important;opacity:1}
+[class*="st-key-library-card-"],[class*="st-key-result-card-"]{background:var(--vw-surface);border:1px solid var(--vw-border)!important;border-radius:var(--vw-radius)!important;padding:24px!important;margin-bottom:24px}
+[class*="st-key-library-card-"]{border-left:4px solid var(--vw-accent)!important}
+[data-testid=stButton] button,[data-testid=stDownloadButton] button{min-height:44px;border-radius:10px;cursor:pointer;transition:background .15s,border-color .15s}
+body:has([data-vw-theme]) button{color:var(--vw-text)!important}
+body:has([data-vw-theme]) :is([data-testid=stButton],[data-testid=stDownloadButton],[data-testid=stFileUploaderDropzone]) button{background:var(--vw-surface)!important;border:1px solid var(--vw-border)!important}
+body:has([data-vw-theme]) :is([data-testid=stButton],[data-testid=stDownloadButton],[data-testid=stFileUploaderDropzone]) button:not(:disabled):hover{background:var(--vw-hover)!important;border-color:var(--vw-accent)!important}
+body:has([data-vw-theme]) button[kind=primary]{background:#1d4ed8!important;color:#fff!important;border-color:#1d4ed8!important}
+body:has([data-vw-theme]) button[kind=primary]:not(:disabled):hover{background:#1e40af!important;color:#fff!important}
+body:has([data-vw-theme]) button :is(p,span,[data-testid=stMarkdownContainer]){color:inherit!important}
+button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid var(--vw-ring)!important;outline-offset:3px}
+body:has([data-vw-theme]) :is(input,textarea){color:var(--vw-text)!important;caret-color:var(--vw-text);}
+body:has([data-vw-theme]) :is(input,textarea)::placeholder{color:var(--vw-muted)!important;opacity:1!important}
+[data-testid=stTextInput] input{min-height:44px}
+body:has([data-vw-theme]) :is([data-baseweb=input],[data-baseweb=base-input],[data-baseweb=textarea],[data-baseweb=select]>div){background:var(--vw-field)!important;color:var(--vw-text)!important}
+body:has([data-vw-theme]) :is([data-baseweb=input],[data-baseweb=textarea],[data-baseweb=select]>div){border-color:var(--vw-border)!important}
+body:has([data-vw-theme]) :is([data-baseweb=select],[data-baseweb=select] div,[data-testid=stNumberInputContainer]){color:var(--vw-text)!important}
+body:has([data-vw-theme]) [data-testid=stNumberInputContainer]{background:var(--vw-field)!important;border:1px solid var(--vw-border)!important}
+body:has([data-vw-theme]) [data-testid=stNumberInputContainer] :is(button,input){background:var(--vw-field)!important;color:var(--vw-text)!important}
+body:has([data-vw-theme]) :is([role=listbox],[role=option]){background:var(--vw-surface)!important;color:var(--vw-text)!important}
+body:has([data-vw-theme]) [role=option]:hover{background:var(--vw-hover)!important}
+body:has([data-vw-theme]) [data-testid=stFileUploaderDropzone]{background:var(--vw-field)!important;color:var(--vw-text)!important;border-color:var(--vw-border)!important}
+body:has([data-vw-theme]) [data-testid=stFileUploaderDropzone] :is(span,small){color:var(--vw-muted)!important}
+body:has([data-vw-theme]) :is([data-testid=stHeader],[data-testid=stToolbar]){background:var(--vw-bg)!important;color:var(--vw-text)!important}
+[data-testid=stExpander]{border-color:var(--vw-border)!important;border-radius:12px}
+[data-testid=stExpander] summary{min-height:44px}
+@media(max-width:600px){[data-testid=stMainBlockContainer]{padding:4rem 1rem 3rem}[class*="st-key-library-card-"],[class*="st-key-result-card-"]{padding:16px!important;margin-bottom:18px}h1{font-size:2rem!important}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+/* BaseWeb inputs suppress their own outline; focus must be visible on the wrapper. */
+body:has([data-vw-theme]) :is([data-baseweb=input],[data-baseweb=textarea],[data-baseweb=select]>div,[data-testid=stNumberInputContainer]):focus-within{outline:3px solid var(--vw-ring)!important;outline-offset:3px;border-color:var(--vw-ring)!important}
+body:has([data-vw-theme]) [data-testid=stPopoverBody]{background:var(--vw-surface)!important;color:var(--vw-text)!important;border:1px solid var(--vw-border)!important}
+body:has([data-vw-theme]) [data-testid=stAlert]{background:var(--vw-field)!important;color:var(--vw-text)!important;border:1px solid var(--vw-border)!important}
+body:has([data-vw-theme]) [data-testid=stAlert] :is(p,span){color:var(--vw-text)!important}
+body:has([data-vw-theme]) [data-testid=stPopoverBody]>div{background:var(--vw-surface)!important;color:var(--vw-text)!important}
+body:has([data-vw-theme]) [data-testid=stPopoverButton]{background:var(--vw-surface)!important;color:var(--vw-text)!important;border:1px solid var(--vw-border)!important;min-height:44px}
+body:has([data-vw-theme]) [data-testid=stPopoverButton]:hover{background:var(--vw-hover)!important}
+/* Fixed editor, with matching reserved space so search results remain reachable. */
+.st-key-montage-dock{position:fixed!important;bottom:0;left:0;right:0;z-index:100;background:var(--vw-surface)!important;color:var(--vw-text);border-top:1px solid var(--vw-border);box-shadow:0 -5px 24px #0002;padding:10px max(16px,calc((100vw - 1160px)/2)) max(10px,env(safe-area-inset-bottom))!important;max-height:55dvh;overflow-y:auto;gap:8px!important}
+body:has(.st-key-montage-dock) [data-testid=stMainBlockContainer]{padding-bottom:calc(var(--vw-dock-height,310px) + 64px)!important}
+body:has(.st-key-montage-dock) [data-testid=stMain]{scroll-padding-bottom:calc(var(--vw-dock-height,310px) + 24px)}
+body:has(.st-key-montage-dock) :is(button,input,summary,[tabindex]){scroll-margin-bottom:calc(var(--vw-dock-height,310px) + 24px)}
+body:has(.st-key-montage-dock):not(:has(.st-key-montage-dock iframe)) [data-testid=stMainBlockContainer]{padding-bottom:140px!important}
+.st-key-montage-dock [data-testid=stHorizontalBlock]{gap:8px}
+@media(max-width:650px){.st-key-montage-dock{padding:8px!important;max-height:58dvh}.st-key-montage-dock [data-testid=stHorizontalBlock]{flex-wrap:nowrap!important}.st-key-montage-dock [data-testid=stColumn]{min-width:0!important;width:auto!important;flex:1!important}.st-key-montage-dock button{font-size:12px;white-space:normal}}
+
+/* Theme changes must not cross-fade a light background under dark-theme text. */
+body:has([data-vw-theme]) :is(button,input,textarea,[data-baseweb]){transition-property:box-shadow!important}
