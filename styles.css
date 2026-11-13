@@ -102,6 +102,18 @@ body:has([data-vw-theme]) :is(button,input,textarea,[data-baseweb]){transition-p
 .vw-file-progress progress::-webkit-progress-bar { background: var(--vw-hover); }
 .vw-file-progress progress::-webkit-progress-value { background: var(--vw-accent); }
 .vw-file-progress progress::-moz-progress-bar { background: var(--vw-accent); }
+.vw-file-progress progress:indeterminate::-webkit-progress-bar {
+    background: linear-gradient(90deg, var(--vw-hover) 30%, var(--vw-accent) 50%, var(--vw-hover) 70%);
+    background-size: 200% 100%;
+    animation: vw-progress 1.6s linear infinite alternate;
+}
+@keyframes vw-progress {
+    from { background-position: 100% 0; }
+    to { background-position: 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .vw-file-progress progress:indeterminate::-webkit-progress-bar { animation: none; }
+}
 
 @media (max-width: 860px) {
     .vw-file-progress { grid-template-columns: minmax(30px, 1fr) max-content; gap: 4px 8px; }

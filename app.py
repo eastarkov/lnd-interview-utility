@@ -9,7 +9,7 @@ from pathlib import Path
 import streamlit as st
 from core import timecode, parse_time, person_query, lexical_matches
 from semantic import passages
-from processing import Processing
+from processing import DEFAULT_MODEL, MODELS, JobState, Processing
 from library import (load_records, save_record, delete_transcript, atomic_json,
                      choose_videos, content_key, update_record, video_path)
 from words import frequent_words
@@ -26,6 +26,10 @@ try:
     settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
 except (OSError, ValueError):
     settings = {}
+model_choices = list(MODELS)
+saved_model = settings.get('transcription_model', DEFAULT_MODEL)
+if saved_model not in model_choices:
+    saved_model = DEFAULT_MODEL
 header, options = st.columns([5, 1.3])
 with header:
     st.title('LND Interview Utility')
@@ -33,15 +37,17 @@ with header:
 with options:
     with st.popover('Настройки'):
         appearance = st.selectbox('Тема приложения', ['Светлая', 'Тёмная'], index=1 if settings.get('theme')=='dark' else 0, key='appearance-v5')
-        size = st.selectbox('Модель для новых записей', ['small', 'base', 'medium', 'large-v3'], index=0)
+        size = st.selectbox('Модель распознавания', model_choices, index=model_choices.index(saved_model),
+                            format_func=MODELS.__getitem__, key='transcription-model',
+                            help='По умолчанию Whisper Large V3 Turbo. Для более быстрой обработки выберите Small.')
         language = st.selectbox('Язык речи', ['Авто', 'Русский', 'English'])
         pre = st.number_input('Запас до фразы, сек.', 0.0, 30.0, 0.4, 0.1)
         post = st.number_input('Запас после фразы, сек.', 0.0, 30.0, 0.6, 0.1)
         st.caption('Модели скачиваются при первом использовании. Видео и текст обрабатываются локально.')
 # Stable preference, never inferred from a page whose CSS we change ourselves.
 theme = 'dark' if appearance=='Тёмная' else 'light'
-if settings.get('theme') != theme:
-    settings['theme'] = theme
+if settings.get('theme') != theme or settings.get('transcription_model') != size:
+    settings.update(theme=theme, transcription_model=size)
     atomic_json(settings_path, settings)
 st.html(f'<span data-vw-theme="{theme}"></span><style>' + (BASE / 'styles.css').read_text() + '</style>')
 LIBRARY = DATA / 'library'
@@ -209,10 +215,11 @@ def render_details(key, record, busy, summary_state, transcript_error, frame_err
             st.caption('Содержание готовится.')
         with st.expander('Полная расшифровка'):
             current_model = record.get('recognition', {}).get('model', 'small')
-            more_accurate = 'large-v3' if current_model in ('medium', 'large-v3') else 'medium'
-            st.caption(f'Модель записи: {current_model}')
+            more_accurate = 'large-v3' if current_model == DEFAULT_MODEL else DEFAULT_MODEL
+            st.caption(f'Модель записи: {MODELS.get(current_model, current_model)}')
             if st.button('Расшифровать точнее', key='improve-'+key,
-                         disabled=busy or current_model == 'large-v3'):
+                         disabled=busy or current_model == 'large-v3',
+                         help=f'Повторить распознавание с {MODELS[more_accurate]}.'):
                 processing.transcribe(key, record, more_accurate, language)
                 st.rerun()
             for segment in record['segments']:
@@ -221,23 +228,25 @@ def render_details(key, record, busy, summary_state, transcript_error, frame_err
 
 def render_progress(key, record):
     jobs = processing.snapshot()
-    state, percent, _ = jobs.get(('transcript', key), ('', 0, ''))
-    if state == 'queued':
+    job = jobs.get(('transcript', key), JobState())
+    percent = job.percent
+    if job.state == 'queued':
         label = 'В очереди'
-    elif state == 'running':
-        label = f'Распознаётся · {percent}%'
-    elif state == 'error':
+    elif job.state == 'running':
+        label = f'{job.stage} · {percent}%' if percent is not None else job.stage or 'Подготовка…'
+    elif job.state == 'error':
         label = 'Ошибка'
-    elif record.get('pending') and state != 'done':
+    elif record.get('pending') and job.state != 'done':
         label = 'Без расшифровки'
     else:
         label = 'Готово'
         percent = 100
-        if jobs.get(('summary', key), ('',))[0] in ('queued', 'running'):
+        if jobs.get(('summary', key), JobState()).state in ('queued', 'running'):
             label = 'Готово · пересказ…'
     name = escape(record['name'], quote=True)
+    value = f' value="{percent}"' if percent is not None else ''
     st.html(f'<div class="vw-file-progress"><span class="vw-file-name">{name}</span>'
-            f'<progress value="{percent}" max="100" aria-label="Расшифровка {name}"></progress>'
+            f'<progress{value} max="100" aria-label="Расшифровка {name}"></progress>'
             f'<span role="status" aria-label="{name}: {label}">{label}</span></div>')
 
 
@@ -246,10 +255,10 @@ def render_library():
     if finished_jobs(jobs) != finished_jobs(jobs_at_load):
         st.rerun()
     for key, record in sorted(records.items(), key=lambda item: item[1]['name'].casefold()):
-        transcript_state, _, error = jobs.get(('transcript', key), ('', 0, ''))
-        summary_state = jobs.get(('summary', key), ('',))[0]
-        frame_state = jobs.get(('frame', key), ('',))[0]
-        transcribing = transcript_state in ('queued', 'running')
+        transcript = jobs.get(('transcript', key), JobState())
+        summary_state = jobs.get(('summary', key), JobState()).state
+        frame_state = jobs.get(('frame', key), JobState()).state
+        transcribing = transcript.state in ('queued', 'running')
         if not transcribing and not summary_state and record['passages'] and not record.get('summary'):
             processing.summarize(key, record['segments'])
             summary_state = 'queued'
@@ -277,11 +286,11 @@ def render_library():
                     update_record(LIBRARY, key, {'person': person})
                     st.rerun()
             with details:
-                render_details(key, record, transcribing, summary_state, error, frame_state == 'error')
+                render_details(key, record, transcribing, summary_state, transcript.error, frame_state == 'error')
 
 
 def finished_jobs(states):
-    return {job: state for job, (state, _, _) in states.items() if state in ('done', 'error')}
+    return {job: status.state for job, status in states.items() if status.state in ('done', 'error')}
 
 
 def choose_word(word):
@@ -380,7 +389,7 @@ def render_search():
 
 library_tab, search_tab = st.tabs(['Видеотека', 'Поиск'])
 with library_tab:
-    polling = any(state in ('queued', 'running') for state, _, _ in jobs_at_load.values())
+    polling = any(status.state in ('queued', 'running') for status in jobs_at_load.values())
     for key, record in records.items():
         needs_frame = (('frame', key) not in jobs_at_load and Path(record['source']).is_file()
                        and not (LIBRARY / key / 'thumbnail.jpg').is_file())

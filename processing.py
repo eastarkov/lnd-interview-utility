@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
+from typing import NamedTuple, Optional
 
 from faster_whisper import WhisperModel
 
@@ -11,6 +12,23 @@ from core import extract_audio, ffmpeg
 from library import update_record
 from semantic import SemanticIndex, passages, summary_indices
 from summarize import Summarizer
+
+
+DEFAULT_MODEL = 'large-v3-turbo'
+MODELS = {
+    'large-v3-turbo': 'Whisper Large V3 Turbo',
+    'small': 'Whisper Small',
+    'base': 'Whisper Base',
+    'medium': 'Whisper Medium',
+    'large-v3': 'Whisper Large V3',
+}
+
+
+class JobState(NamedTuple):
+    state: str = ''
+    percent: Optional[int] = 0
+    error: str = ''
+    stage: str = ''
 
 
 @lru_cache(maxsize=1)
@@ -44,30 +62,30 @@ class Processing:
     def clear(self, kind, key):
         with self._lock:
             job = (kind, key)
-            if self._states.get(job, ('',))[0] not in ('queued', 'running'):
+            if self._states.get(job, JobState()).state not in ('queued', 'running'):
                 self._states.pop(job, None)
 
     def _submit(self, kind, key, work, *args):
         job = (kind, key)
         with self._lock:
-            if self._states.get(job, ('',))[0] in ('queued', 'running'):
+            if self._states.get(job, JobState()).state in ('queued', 'running'):
                 return
-            self._states[job] = ('queued', 0, '')
+            self._states[job] = JobState('queued')
         executor = self._frames if kind == 'frame' else self._inference
         executor.submit(self._run, job, work, args)
 
     def _run(self, job, work, args):
-        def progress(value):
+        def progress(value=None, stage=''):
             with self._lock:
-                self._states[job] = ('running', value, '')
-        progress(0)
+                self._states[job] = JobState('running', value, stage=stage)
+        progress()
         try:
             work(*args, progress)
-            result = ('done', 100, '')
+            result = JobState('done', 100)
         except Exception as error:
             with self._lock:
-                last_progress = self._states[job][1]
-            result = ('error', last_progress, str(error).strip() or type(error).__name__)
+                last_progress = self._states[job].percent
+            result = JobState('error', last_progress or 0, str(error).strip() or type(error).__name__)
         with self._lock:
             self._states[job] = result
 
@@ -76,6 +94,7 @@ class Processing:
 
     def _transcribe(self, key, record, size, language, progress):
         audio = Path(record['audio'])
+        progress(stage='Готовлю звук…')
         with artifact_lock(audio):
             if not audio.is_file():
                 temp = audio.with_name('extracting.wav')
@@ -84,15 +103,20 @@ class Processing:
                     temp.replace(audio)
                 finally:
                     temp.unlink(missing_ok=True)
+        progress(stage='Готовлю Whisper…')
         model = whisper_model(self.data / 'whisper', size)
+        progress(stage='Анализирую аудио…')
         segments, info = model.transcribe(
             str(audio), language={'Авто': None, 'Русский': 'ru', 'English': 'en'}[language],
             word_timestamps=True, vad_filter=True)
-        result, words = [], []
+        progress(stage='Распознаю речь…')
+        result, words, percent = [], [], 0
         for segment in segments:
             result.append({'start': segment.start, 'end': segment.end, 'text': segment.text})
             words.extend({'start': w.start, 'end': w.end, 'word': w.word} for w in (segment.words or []))
-            progress(min(99, int(100 * segment.end / max(info.duration, 1))))
+            percent = max(percent, min(99, int(100 * segment.end / max(info.duration, 0.001))))
+            progress(percent, 'Распознаю')
+        progress(99, 'Сохраняю текст…')
         update_record(self.library, key, {
             'segments': result, 'words': words, 'duration': info.duration,
             'pending': False, 'summary': None, 'recognition': {'model': size, 'language': language},
