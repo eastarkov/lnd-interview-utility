@@ -71,7 +71,7 @@ def atomic_json(path, value):
 
 def save_record(base, key, record):
     atomic_json(Path(base)/key/'record.json', {k: v for k, v in record.items()
-                if k in {'name','content_key','duration','media_duration','segments','words','person','summary','recognition','pending','original_path'}})
+                if k in {'name','content_key','duration','media_duration','segments','words','person','summary','recognition','pending','original_path','removed'}})
 
 
 def update_record(base, key, changes, expected_segments=None):
@@ -95,12 +95,17 @@ def resolve_source(folder, record):
     return str(cached)
 
 
-def load_records(base):
+def load_records(base, *, include_removed=False):
     records, errors = {}, []
     for path in sorted(Path(base).glob('*/record.json')):
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
-            record.update(source=resolve_source(path.parent, record), audio=str(path.parent/'audio.wav'))
+            if record.get('removed'):
+                if not include_removed:
+                    continue
+            else:
+                record['source'] = resolve_source(path.parent, record)
+            record['audio'] = str(path.parent/'audio.wav')
             records[path.parent.name] = record
         except (ValueError, OSError) as error:
             errors.append(f'{path.parent.name}: {error}')

@@ -72,24 +72,35 @@ except (OSError, ValueError):
     saved_people = {}
 
 
-def attach_original(key, record, path):
-    record.update(original_path=str(path), source=str(path))
-    update_record(LIBRARY, key, {'original_path': str(path)})
+def attach_original(key, record, path, *, restore=False):
+    changes = {'original_path': str(path)}
+    if restore:
+        changes['removed'] = False
+    update_record(LIBRARY, key, changes)
+    record.update(changes)
+    record['source'] = str(path)
     processing.clear('frame', key)
 
 
 def add_videos(paths, transcribe=True):
     added = []
     errors = []
+    known, _ = load_records(LIBRARY, include_removed=True)
     for value in paths:
         try:
             source = video_path(value)
             with st.spinner(f'Проверяю файл: {source.name}'):
                 digest = content_key(source)
-            existing = next((k for k, r in records.items() if r.get('content_key', k) == digest), None)
+            existing = next((k for k, r in known.items() if r.get('content_key', k) == digest), None)
             if existing:
-                attach_original(existing, records[existing], source)
-                st.info(f'{source.name}: оригинал привязан к существующей записи.')
+                restore = bool(known[existing].get('removed'))
+                record = known[existing] if restore else records.get(existing, known[existing])
+                attach_original(existing, record, source, restore=restore)
+                records[existing] = record
+                if restore:
+                    added.append((existing, record))
+                else:
+                    st.info(f'{source.name}: оригинал привязан к существующей записи.')
                 continue
             duration = video_duration(source)
             folder = LIBRARY / digest
@@ -99,12 +110,14 @@ def add_videos(paths, transcribe=True):
                       'media_duration': duration, 'pending':True}
             records[digest] = record
             save_record(LIBRARY, digest, record)
+            known[digest] = record
             added.append((digest, record))
         except (OSError, ValueError) as error:
             errors.append(f'Не удалось добавить файл: {error}')
     if transcribe:
         for key, record in added:
-            processing.transcribe(key, record, size, language)
+            if record.get('pending'):
+                processing.transcribe(key, record, size, language)
     if added:
         if not transcribe:
             st.session_state['last-manual-source'] = added[0][0]
@@ -195,6 +208,16 @@ def manage_record(key, record, busy):
                 st.rerun()
             if regenerate.button('Перегенерировать', key='regenerate-'+key, disabled=busy):
                 processing.transcribe(key, record, size, language)
+                st.rerun()
+        st.divider()
+        if st.button('Удалить из проекта', key='remove-record-'+key,
+                     help='Убирает видео из видеотеки и монтажа. Чтобы вернуть запись с расшифровкой, снова добавьте исходный файл.'):
+            try:
+                update_record(LIBRARY, key, {'removed': True})
+            except OSError as error:
+                st.error(f'Не удалось удалить видео из проекта: {error}')
+            else:
+                st.session_state['removed-video-notice'] = record['name']
                 st.rerun()
 
 
@@ -462,6 +485,8 @@ def render_search():
 
 for error in st.session_state.pop('import-errors', []):
     st.error(error)
+if removed_name := st.session_state.pop('removed-video-notice', None):
+    st.toast(f'{removed_name} удалено из проекта.')
 
 with st.container(key='app-navigation'):
     page = st.segmented_control('Раздел', ['Видеотека', 'Ручной монтаж', 'Поиск'],
@@ -469,7 +494,8 @@ with st.container(key='app-navigation'):
                                 key='app-navigation-choice') or 'Видеотека'
 invalid = changed_selection = manual_changed = False
 if page == 'Видеотека':
-    polling = any(status.state in ('queued', 'running') for status in jobs_at_load.values())
+    polling = any(key in records and status.state in ('queued', 'running')
+                  for (_, key), status in jobs_at_load.items())
     for key, record in records.items():
         needs_frame = (('frame', key) not in jobs_at_load and Path(record['source']).is_file()
                        and not (LIBRARY / key / 'thumbnail.jpg').is_file())
@@ -484,8 +510,9 @@ elif page == 'Ручной монтаж':
     manual_changed = render_manual()
 
 else:
-    @st.fragment(run_every=1 if any(kind == 'transcript' and job.state in ('queued', 'running')
-                                    for (kind, _), job in jobs_at_load.items()) else None)
+    @st.fragment(run_every=1 if any(kind == 'transcript' and key in records
+                                    and job.state in ('queued', 'running')
+                                    for (kind, key), job in jobs_at_load.items()) else None)
     def refresh_search():
         def transcripts(states):
             return {key: status for key, status in finished_jobs(states).items() if key[0] == 'transcript'}
