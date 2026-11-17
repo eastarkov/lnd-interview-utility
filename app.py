@@ -547,21 +547,26 @@ with st.container(key='montage-dock'):
                                          label=record.get('person') or record['name'],
                                          duration=item['end'] - item['start'],
                                          source_duration=source_duration(record)))
-            action = timeline(preview_data, theme=theme)
-            if action and action.get('sequence') != st.session_state.get('timeline-sequence'):
+            acknowledged = st.session_state.get('timeline-sequence')
+            action = timeline(preview_data, theme=theme, ack=acknowledged)
+            if action and action.get('sequence') != acknowledged:
                 st.session_state['timeline-sequence'] = action['sequence']
                 if action.get('type') in ('trim', 'remove'):
                     st.session_state['pending-montage-action'] = action
-                    st.rerun()
-                new_items = reordered(items, action['order'])
-                if [i['id'] for i in new_items] != [i['id'] for i in items]:
-                    st.session_state['montage-v5'] = new_items
-                    atomic_json(project_path, new_items)
-                    st.rerun()
+                else:
+                    try:
+                        new_items = reordered(items, action['order'])
+                        atomic_json(project_path, new_items)
+                        st.session_state['montage-v5'] = new_items
+                    except (KeyError, TypeError, ValueError, OSError) as error:
+                        st.session_state['timeline-error'] = str(error)
+                st.rerun()
         except Exception as error:
             st.error(f'Не удалось показать таймлайн: {error}')
     else:
         st.info('Добавьте фрагменты во вкладке «Ручной монтаж» или «Поиск».')
+    if error := st.session_state.pop('timeline-error', None):
+        st.error(f'Не удалось изменить порядок фрагментов: {error}')
 
     path = exchange_path(DATA)
     has_exchange = path.is_file()
