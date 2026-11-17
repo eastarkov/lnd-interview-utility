@@ -73,6 +73,8 @@ def timecode(seconds):
 
 
 def parse_time(value):
+    if isinstance(value, (int, float)):
+        return float(value)
     parts = value.strip().replace(',', '.').split(':')
     if len(parts) not in (2, 3) or any(not re.fullmatch(r'\d+', x) for x in parts[:-1]) or not re.fullmatch(r'\d+(?:\.\d+)?', parts[-1]):
         raise ValueError('Введите время в формате ММ:СС или ММ:СС.ммм.')

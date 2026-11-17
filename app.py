@@ -150,10 +150,10 @@ if pending_action:
             identity = previous['id']
             edit = st.session_state.setdefault('clip-edits', {}).setdefault(identity, {})
             if pending_action['type']=='remove':
-                edit.update(start=timecode(previous['start']), end=timecode(previous['end']))
+                edit.update(start=previous['start'], end=previous['end'])
             else:
                 item = next(i for i in updated if i['id']==identity)
-                edit.update(start=timecode(item['start']), end=timecode(item['end']))
+                edit.update(start=item['start'], end=item['end'])
             project = {item['id']:item for item in updated}
             st.session_state['montage-v5'] = updated
             atomic_json(project_path, updated)
@@ -447,11 +447,11 @@ def render_search():
     for identity, record, hit in matches[(page-1)*5:page*5]:
         existing = project.get(identity)
         duration = source_duration(record)
-        default_start = timecode(max(0, hit['start'] - pre))
-        default_end = timecode(min(duration, hit['end'] + post))
+        default_start = max(0, hit['start'] - pre)
+        default_end = min(duration, hit['end'] + post)
         edit = saved.setdefault(identity, {
-            'start': timecode(existing['start']) if existing else default_start,
-            'end': timecode(existing['end']) if existing else default_end,
+            'start': existing['start'] if existing else default_start,
+            'end': existing['end'] if existing else default_end,
         })
         with st.container(border=True, key='result-card-'+identity):
             heading, action = st.columns([3, 1.4], gap='small', vertical_alignment='center')
@@ -465,7 +465,7 @@ def render_search():
                 value = editor(source, start, end, duration, key='editor-'+identity, theme=theme)
                 if value and value.get('sequence') != edit.get('sequence'):
                     new_start, new_end = clip_bounds(value['start'], value['end'], duration)
-                    edit.update(start=timecode(new_start), end=timecode(new_end), sequence=value['sequence'])
+                    edit.update(start=new_start, end=new_end, sequence=value['sequence'])
             except Exception as error:
                 st.error(f'Редактор: {error}')
 

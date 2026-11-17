@@ -40,25 +40,33 @@ input[aria-invalid=true] {border-color:#b62e2e;outline:2px solid #b62e2e}
     <output id="addStatus" role="status"></output>
 </div>
 <p id="boundError" class="error bound-error" role="status"></p>
-<p class="help">Точная подрезка: Shift + перетаскивание ручки. Стрелки двигают границу на 0,01 с, с Shift — на 0,1 с. В полях можно ввести секунды или ММ:СС.ммм и нажать Enter.</p><div id="error" class="error" role="alert"></div>
+<p class="help">Точная подрезка: Shift + перетаскивание ручки. Стрелки двигают границу, с Shift шаг больше. В полях можно ввести секунды или таймкод с дробной частью и нажать Enter.</p><div id="error" class="error" role="alert"></div>
 <script>
 const $=id=>document.getElementById(id),v=$('video'),st=$('startText'),et=$('endText'),bar=$('timeline');
 let state={start:0,end:1,duration:1},source=null,lastBounds='',init=false,sequence=Date.now(),full=false,dragging=null;
 let manual = false;
 let pendingAdd = null;
-const fields={start:st,end:et}, minLength=.001;
+const fields={start:st,end:et};
 const dirty=new Set();
+const decimalSeconds=new Intl.NumberFormat('en-US',{useGrouping:false,maximumSignificantDigits:17});
 const send=(type,extra={})=>window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*');
 function fmt(t){
     const ms=Math.round(Math.max(0,t||0)*1000);
     return String(Math.floor(ms/60000)).padStart(2,'0')+':'+((ms%60000)/1000).toFixed(3).padStart(6,'0');
 }
+function fmtBound(t){
+    const [whole,fraction='']=decimalSeconds.format(t).split('.');
+    return String(Math.floor(Number(whole)/60)).padStart(2,'0')+':'+
+        String(Number(whole)%60).padStart(2,'0')+'.'+fraction.padEnd(3,'0');
+}
 function parse(text){
     const parts=text.trim().replace(',','.').split(':');
     const seconds=parts.pop();
-    if(parts.length>2||parts.some(part=>!/^\d+$/.test(part))||!/^\d+(\.\d{1,3})?$/.test(seconds))return NaN;
+    if(parts.length>2||parts.some(part=>!/^\d+$/.test(part))||!/^\d+(\.\d+)?$/.test(seconds))return NaN;
     if((parts.length&&+seconds>=60)||(parts.length===2&&+parts[1]>=60))return NaN;
-    return parts.reduce((time,part)=>time*60+Number(part),0)*60+Number(seconds);
+    const [whole,fraction='0']=seconds.split('.');
+    const total=parts.reduce((time,part)=>time*60+Number(part),0)*60+Number(whole);
+    return Number(total+'.'+fraction);
 }
 function draw(){
     const a=state.start/state.duration*100,b=state.end/state.duration*100;
@@ -67,13 +75,13 @@ function draw(){
         el.style.left=percent+'%';
         el.setAttribute('aria-valuemax',state.duration);
         el.setAttribute('aria-valuenow',state[edge]);
-        el.setAttribute('aria-valuetext',fmt(state[edge]));
-        if(!dirty.has(edge))fields[edge].value=fmt(state[edge]);
+        el.setAttribute('aria-valuetext',fmtBound(state[edge]));
+        if(!dirty.has(edge))fields[edge].value=fmtBound(state[edge]);
     }
     Object.assign($('selection').style,{left:a+'%',width:(b-a)+'%'});
     $('leftShade').style.width=a+'%';
     $('rightShade').style.width=(100-b)+'%';
-    $('duration').textContent='Фрагмент '+fmt(state.end-state.start);
+    $('duration').textContent='Фрагмент '+fmtBound(Number((state.end-state.start).toPrecision(6)));
 }
 function fieldError(message,edges=[]){
     $('boundError').textContent=message;
@@ -89,7 +97,7 @@ function resetDraft(){
 }
 function seekPreview(edge){
     v.pause();
-    v.currentTime=edge==='start'?state.start:Math.max(state.start,state.end-minLength);
+    v.currentTime=edge==='start'?state.start:state.end-Math.min(.001,(state.end-state.start)/2);
 }
 function applyDraft(){
     if(!dirty.size)return true;
@@ -97,14 +105,14 @@ function applyDraft(){
     for(const edge of dirty){
         const value=parse(fields[edge].value);
         if(!Number.isFinite(value)){
-            fieldError('Введите время в секундах или в формате ММ:СС.ммм.',[edge]);
+            fieldError('Введите время в секундах или в формате ММ:СС с дробной частью.',[edge]);
             return false;
         }
-        if(value>Math.round(state.duration*1000)/1000&&value>state.duration){
+        if(value>state.duration){
             fieldError('Время выходит за пределы исходного видео.',[edge]);
             return false;
         }
-        proposed[edge]=Math.min(value,state.duration);
+        proposed[edge]=value;
     }
     if(proposed.start>=proposed.end){
         fieldError('Конец фрагмента должен быть позже начала.',['start','end']);
@@ -122,15 +130,16 @@ function applyDraft(){
     return true;
 }
 function update(edge,value,{notify=true,mark=false}={}){
-    const gap=Math.min(minLength,state.end-state.start);
     const previousStart=state.start,previousEnd=state.end;
+    let start=edge==='start'?Math.max(0,value):previousStart;
+    let end=edge==='end'?Math.min(state.duration,value):previousEnd;
     if(manual&&mark){
-        if(edge==='start'&&value>state.end-gap)state.end=state.duration;
-        if(edge==='end'&&value<state.start+gap)state.start=0;
+        if(edge==='start'&&start>=end)end=state.duration;
+        if(edge==='end'&&end<=start)start=0;
     }
-    const rounded=Math.round(value*1000)/1000;
-    if(edge==='start')state.start=Math.max(0,Math.min(rounded,state.end-gap));
-    else state.end=Math.min(state.duration,Math.max(rounded,state.start+gap));
+    if(!(0<=start&&start<end&&end<=state.duration))return;
+    state.start=start;
+    state.end=end;
     if(!mark||!manual)seekPreview(edge);
     $('addStatus').textContent='';
     resetDraft();
@@ -158,7 +167,7 @@ $('play').onclick=play;$('stage').onkeydown=e=>{if(e.code==='Space'&&e.target===
 $('whole').onclick=()=>{full=!full;syncPlaybackMode();if(!full&&(v.currentTime<state.start||v.currentTime>state.end)){v.pause();v.currentTime=state.start}};
 for(const [edge,field] of Object.entries(fields)){
     field.oninput=()=>{
-        if(field.value===fmt(state[edge]))dirty.delete(edge);
+        if(field.value===fmtBound(state[edge]))dirty.delete(edge);
         else dirty.add(edge);
         fieldError('');
     };
@@ -179,10 +188,12 @@ for(const [edge,field] of Object.entries(fields)){
     handle.onpointermove=e=>{
         if(!dragging)return;
         const scale=state.duration/bar.clientWidth;
-        dragging.value+=(e.clientX-dragging.x)*(e.shiftKey?Math.min(.001,scale):scale);
+        const step=e.shiftKey?Math.min(.001,scale,(dragging.end-dragging.start)/bar.clientWidth):scale;
+        const lower=edge==='start'?0:state.start;
+        const upper=edge==='start'?state.end:state.duration;
+        dragging.value=Math.max(lower,Math.min(upper,dragging.value+(e.clientX-dragging.x)*step));
         dragging.x=e.clientX;
         update(edge,dragging.value,{notify:false});
-        if(Math.abs(dragging.value-state[edge])>.001)dragging.value=state[edge];
     };
     handle.onpointerup=()=>{
         if(!dragging)return;
@@ -199,7 +210,7 @@ for(const [edge,field] of Object.entries(fields)){
         seekPreview(edge);
     };
     handle.onkeydown=e=>{
-        const step=e.shiftKey?.1:.01;
+        const step=Math.min(.01,(state.end-state.start)/8)*(e.shiftKey?10:1);
         let t=state[edge];
         if(e.key==='ArrowLeft'||e.key==='ArrowDown')t-=step;
         else if(e.key==='ArrowRight'||e.key==='ArrowUp')t+=step;

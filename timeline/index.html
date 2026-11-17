@@ -14,12 +14,12 @@
 @media(max-width:650px){.status + .view-toggle{margin-left:auto}}
 </style>
 <div class="bar"><span class="heading" id="heading">Монтаж</span><span class="speaker" id="speaker"></span><span class="clock" id="clock">00:00 / 00:00</span><span class="status" id="status"></span><button class="view-toggle" id="compact" aria-pressed="false">Компактный вид</button></div>
-<div class="workspace"><div class="stage"><video id="video" crossorigin="anonymous" preload="metadata" playsinline></video><div class="player-buttons"><button id="play" aria-label="Воспроизвести монтаж"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button></div></div><div class="edit-area"><div id="tracks" class="tracks" aria-label="Порядок и границы фрагментов монтажа"></div><input id="seek" class="seek" type="range" min="0" max="1" step="0.001" value="0" aria-label="Позиция в общем ролике"><div class="hint" id="trackHint">Жёлтые края — обрезка · × — убрать из монтажа</div></div></div><div id="error" class="error" role="alert"></div>
+<div class="workspace"><div class="stage"><video id="video" crossorigin="anonymous" preload="metadata" playsinline></video><div class="player-buttons"><button id="play" aria-label="Воспроизвести монтаж"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></button></div></div><div class="edit-area"><div id="tracks" class="tracks" aria-label="Порядок и границы фрагментов монтажа"></div><input id="seek" class="seek" type="range" min="0" max="1" step="any" value="0" aria-label="Позиция в общем ролике"><div class="hint" id="trackHint">Жёлтые края — обрезка · × — убрать из монтажа</div></div></div><div id="error" class="error" role="alert"></div>
 <script>
 const $=id=>document.getElementById(id),v=$('video'),tracks=$('tracks');
 let clips=[],index=0,sequence=Date.now(),wantedPlay=false,trim=null,sourceMode=false,sourceSeek=0;
 let drag=null, pending=null;
-const minLength=.001;
+const decimalSeconds=new Intl.NumberFormat('en-US',{useGrouping:false,maximumSignificantDigits:17});
 const view={compact:false, fullLeft:0, compactLeft:0};
 const viewKey='montage-view';
 try { Object.assign(view, JSON.parse(sessionStorage.getItem(viewKey))); } catch {}
@@ -34,6 +34,11 @@ const icon=path=>'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'+path+'"
 function fmt(t){
     const ms=Math.round(Math.max(0,t||0)*1000);
     return String(Math.floor(ms/60000)).padStart(2,'0')+':'+((ms%60000)/1000).toFixed(3).padStart(6,'0');
+}
+function fmtBound(t){
+    const [whole,fraction='']=decimalSeconds.format(t).split('.');
+    return String(Math.floor(Number(whole)/60)).padStart(2,'0')+':'+
+        String(Number(whole)%60).padStart(2,'0')+'.'+fraction.padEnd(3,'0');
 }
 const url=s=>window.parent.location.protocol+'//'+window.parent.location.hostname+s;
 function offset(i){return clips.slice(0,i).reduce((s,c)=>s+c.duration,0)}
@@ -79,7 +84,7 @@ function toggle(){
     if(!clips.length||!clips[index].url)return;
     if(!v.paused||wantedPlay){v.pause();wantedPlay=false;return}
     if(sourceMode){setIndex(index,0,true);return}
-    if(v.currentTime>=clips[index].end-.001){setIndex(index+1<clips.length?index+1:0,0,true);return}
+    if(v.currentTime>=clips[index].end){setIndex(index+1<clips.length?index+1:0,0,true);return}
     wantedPlay=true;
     if(v.readyState>=1)v.play().catch(playError);
 }
@@ -127,10 +132,11 @@ function remove(id){
 }
 function showSource(c,at){sourceMode=true;v.pause();seekSource(c,at,false)}
 function changeBounds(c,edge,value){
-    const rounded=Math.round(value*1000)/1000;
-    const gap=Math.min(minLength,c.duration);
-    if(edge==='start')c.start=Math.max(0,Math.min(rounded,c.end-gap));
-    else c.end=Math.min(c.source_duration,Math.max(rounded,c.start+gap));
+    const start=edge==='start'?Math.max(0,value):c.start;
+    const end=edge==='end'?Math.min(c.source_duration,value):c.end;
+    if(!(0<=start&&start<end&&end<=c.source_duration))return;
+    c.start=start;
+    c.end=end;
     c.duration=c.end-c.start;
 }
 function finishTrim(c){
@@ -146,13 +152,13 @@ function buildEdge(c,edge,block,detail){
     h.setAttribute('aria-valuemax',c.source_duration);
     function drawTime(){
         h.setAttribute('aria-valuenow',c[edge]);
-        h.setAttribute('aria-valuetext',fmt(c[edge]));
-        detail.textContent=fmt(c.start)+' — '+fmt(c.end);
+        h.setAttribute('aria-valuetext',fmtBound(c[edge]));
+        detail.textContent=fmtBound(c.start)+' — '+fmtBound(c.end);
     }
     function preview(){
         index=clips.indexOf(c);
         paint();
-        showSource(c,edge==='start'?c.start:Math.max(c.start,c.end-.001));
+        showSource(c,edge==='start'?c.start:c.end-Math.min(.001,c.duration/2));
     }
     drawTime();
     h.title='Shift + перетаскивание для точной подрезки';
@@ -161,16 +167,17 @@ function buildEdge(c,edge,block,detail){
         e.preventDefault();
         h.focus({preventScroll:true});
         h.setPointerCapture(e.pointerId);
-        trim={x:e.clientX,start:c.start,end:c.end,value:c[edge],scale:Math.max(.001,c.duration/block.clientWidth)};
+        trim={x:e.clientX,start:c.start,end:c.end,value:c[edge],scale:c.duration/block.clientWidth};
         block.classList.add('trimming');
     };
     h.onpointermove=e=>{
         if(!trim)return;
         const scale=e.shiftKey?Math.min(.001,trim.scale):trim.scale;
-        trim.value+=(e.clientX-trim.x)*scale;
+        const lower=edge==='start'?0:c.start;
+        const upper=edge==='start'?c.end:c.source_duration;
+        trim.value=Math.max(lower,Math.min(upper,trim.value+(e.clientX-trim.x)*scale));
         trim.x=e.clientX;
         changeBounds(c,edge,trim.value);
-        if(Math.abs(trim.value-c[edge])>.001)trim.value=c[edge];
         drawTime();
         preview();
     };
@@ -196,7 +203,8 @@ function buildEdge(c,edge,block,detail){
         e.preventDefault();
         const delta=['ArrowLeft','ArrowDown'].includes(e.key)?-1:1;
         const previous=c[edge];
-        changeBounds(c,edge,previous+delta*(e.shiftKey?.1:.01));
+        const step=Math.min(.01,c.duration/8);
+        changeBounds(c,edge,previous+delta*step*(e.shiftKey?10:1));
         if(c[edge]!==previous){preview();finishTrim(c)}
     };
     return h;
@@ -240,13 +248,13 @@ function render(left=tracks.scrollLeft){
     $('compact').setAttribute('aria-pressed',String(view.compact));
     $('trackHint').textContent=view.compact?'Перетаскивайте фрагменты, чтобы изменить порядок.':'Жёлтые края — подрезка · Shift + перетаскивание — точная подрезка';
     $('heading').textContent='Монтаж · '+clips.length;
-    $('seek').max=Math.max(montageDuration,.001);
+    $('seek').max=montageDuration||1;
     $('status').textContent='Превью исходников';
     clips.forEach((c,i)=>{
         const block=document.createElement('div');
         block.className='clip';
         block.dataset.id=c.id;
-        block.style.width=Math.max(150,Math.min(360,tracks.clientWidth-8,c.duration/Math.max(montageDuration,.001)*Math.max(600,clips.length*170)))+'px';
+        block.style.width=Math.max(150,Math.min(360,tracks.clientWidth-8,c.duration/montageDuration*Math.max(600,clips.length*170)))+'px';
         block.tabIndex=0;
         block.setAttribute('role','button');
         block.setAttribute('aria-label','Фрагмент '+(i+1)+': '+c.label);
@@ -263,7 +271,7 @@ function render(left=tracks.scrollLeft){
         detail.className='detail';
         const duration=document.createElement('span');
         duration.className='detail';
-        duration.textContent='Длина: '+fmt(c.duration);
+        duration.textContent='Длина: '+fmtBound(Number(c.duration.toPrecision(6)));
         content.append(number,name,detail,duration);
         const del=document.createElement('button');
         del.className='remove';
